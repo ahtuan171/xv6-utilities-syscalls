@@ -4,8 +4,7 @@
 
 void memdump(char *fmt, char *data, int len);
 
-int
-main(int argc, char *argv[])
+int main(int argc, char *argv[])
 {
   if (argc == 1) {
     printf("Example 1:\n");
@@ -57,9 +56,80 @@ main(int argc, char *argv[])
   exit(0);
 }
 
-void
-memdump(char *fmt, char *data, int len)
-{
-  // Your code here.  `data` holds `len` valid bytes.
+void memdump(char *fmt, char *data, int len) {
+  int off = 0; // số byte của data đã dùng (vị trí đọc tiếp theo)
+  char f = 0;  // ký tự format đang xử lý (dùng khi báo lỗi)
 
+  for (int k = 0; fmt[k] != '\0'; k++) {
+    f = fmt[k];
+
+    switch (f) {
+    case 'i': { // 4 byte -> số nguyên 32-bit, in thập phân
+      int v = 0;
+      if (len - off < (int)sizeof(v)) { 
+        goto short_data;
+      }
+      memmove(&v, data + off, sizeof(v)); // copy byte vào biến 
+      off += sizeof(v);
+      printf("%d\n", v);
+      break;
+    }
+    case 'p': { // 8 byte -> số 64-bit, in hex
+      uint64 v = 0;
+      if (len - off < (int)sizeof(v)) {
+        goto short_data;
+      }
+      memmove(&v, data + off, sizeof(v));
+      off += sizeof(v);
+      printf("%lx\n", v); // %lx vì %x của xv6 chỉ in 32-bit
+      break;
+    }
+    case 'h': { // 2 byte -> số nguyên 16-bit, in thập phân
+      short v = 0;
+      if (len - off < (int)sizeof(v)) {
+        goto short_data;
+      }
+      memmove(&v, data + off, sizeof(v));
+      off += sizeof(v);
+      printf("%d\n", v);
+      break;
+    }
+    case 'c': { // 1 byte -> ký tự ASCII
+      char v = 0;
+      if (len - off < (int)sizeof(v)) {
+        goto short_data;
+      }
+      v = data[off];
+      off += sizeof(v);
+      printf("%c\n", v);
+      break;
+    }
+    case 's': { // 8 byte là con trỏ tới một chuỗi C; in chuỗi đó
+      char *v = 0;
+      if (len - off < (int)sizeof(v)) {
+        goto short_data;
+      }
+      memmove(&v, data + off, sizeof(v));
+      off += sizeof(v);
+      printf("%s\n", v);
+      break;
+    }
+    case 'S': { // phần còn lại của data là chuỗi C; dừng ở '\0' hoặc hết len
+      int n = 0;
+      while (off + n < len && data[off + n] != '\0') {
+        n++;
+      }
+      write(1, data + off, n); // không dùng %s để khỏi đọc lố quá len
+      write(1, "\n", 1);
+      off = len; 
+      break;
+    }
+    default: 
+      break;
+    }
+  }
+  return;
+
+short_data:
+  printf("memdump: not enough data for '%c'\n", f);
 }
