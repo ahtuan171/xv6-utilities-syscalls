@@ -90,7 +90,7 @@ OBJCOPY = $(TOOLPREFIX)objcopy
 OBJDUMP = $(TOOLPREFIX)objdump
 
 # Deterministic builds.
-DETFLAGS = -ffile-prefix-map=$(CURDIR)=.
+DETFLAGS = -ffile-prefix-map='$(CURDIR)'=.
 
 CFLAGS = -Wall -Werror -Wno-unknown-attributes -O -fno-omit-frame-pointer -ggdb -gdwarf-2
 CFLAGS += $(DETFLAGS)
