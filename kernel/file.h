@@ -7,6 +7,7 @@ struct file {
   struct inode *ip;  // FD_INODE and FD_DEVICE
   uint off;          // FD_INODE
   short major;       // FD_DEVICE
+  uint console_edit; // console editor token, zero for ordinary files
 };
 
 #define major(dev)  ((dev) >> 16 & 0xFFFF)
