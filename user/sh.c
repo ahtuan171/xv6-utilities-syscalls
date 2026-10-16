@@ -14,7 +14,7 @@
 #define LIST  4
 #define BACK  5
 
-#define MAXARGS 10
+#define MAXARGS    10
 #define CMDBUFSIZE 100
 
 // Check the type before reading: a device such as /console may block forever.
@@ -31,8 +31,8 @@ is_elf_program(const char *path)
   if (fstat(fd, &st) == 0 && st.type == T_FILE)
     n = read(fd, magic, sizeof(magic));
   close(fd);
-  return n == sizeof(magic) && magic[0] == 0x7f &&
-         magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
+  return n == sizeof(magic) && magic[0] == 0x7f && magic[1] == 'E' &&
+         magic[2] == 'L' && magic[3] == 'F';
 }
 
 int
@@ -316,8 +316,8 @@ getcmd(char *buf, int nbuf)
   int len = 0, n, overflow = 0;
   int editfd = -1;
   int is_console = fstat(0, &st) == 0 && st.type == T_DEVICE &&
-                   stat("/console", &console) == 0 &&
-                   st.dev == console.dev && st.ino == console.ino;
+                   stat("/console", &console) == 0 && st.dev == console.dev &&
+                   st.ino == console.ino;
   char c;
 
   // A private open gives the editor a lifetime independent of stdin/stdout.
@@ -359,7 +359,8 @@ getcmd(char *buf, int nbuf)
       if (editfd >= 0)
         write(1, "\a", 1); // reject visibly, allow Backspace/Ctrl+U/Enter
       else
-        overflow = 1; // drain and reject the whole line, never execute fragments
+        overflow =
+          1; // drain and reject the whole line, never execute fragments
       continue;
     }
     buf[len++] = c;
