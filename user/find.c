@@ -9,7 +9,9 @@ char **cmd;   // lệnh sau -exec (trỏ vào argv), 0 nếu không có -exec
 int ncmd;     // số phần tử của lệnh
 
 // Trả về phần tên cuối cùng của path: "./a/b" -> "b"
-char *basename(char *path) {
+char *
+basename(char *path)
+{
   char *p = path + strlen(path);
   while (p >= path && *p != '/') {
     p--;
@@ -18,7 +20,9 @@ char *basename(char *path) {
 }
 
 // Chạy: cmd... path   (fork + exec + wait)
-void run(char *path) {
+void
+run(char *path)
+{
   char *argv[MAXARG];
   int pid;
 
@@ -46,7 +50,9 @@ void run(char *path) {
   wait(0);
 }
 
-void find(char *path) {
+void
+find(char *path)
+{
   char buf[256], *p;
   int fd;
   struct dirent de;
@@ -96,7 +102,9 @@ void find(char *path) {
   close(fd);
 }
 
-int main(int argc, char *argv[]) {
+int
+main(int argc, char *argv[])
+{
   if (argc < 3) {
     fprintf(2, "Usage: find <dir> <name> [-exec cmd ...]\n");
     exit(1);

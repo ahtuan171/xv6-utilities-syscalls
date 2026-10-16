@@ -4,7 +4,8 @@
 
 void memdump(char *fmt, char *data, int len);
 
-int main(int argc, char *argv[])
+int
+main(int argc, char *argv[])
 {
   if (argc == 1) {
     printf("Example 1:\n");
@@ -56,7 +57,9 @@ int main(int argc, char *argv[])
   exit(0);
 }
 
-void memdump(char *fmt, char *data, int len) {
+void
+memdump(char *fmt, char *data, int len)
+{
   int off = 0; // số byte của data đã dùng (vị trí đọc tiếp theo)
   char f = 0;  // ký tự format đang xử lý (dùng khi báo lỗi)
 
@@ -66,10 +69,10 @@ void memdump(char *fmt, char *data, int len) {
     switch (f) {
     case 'i': { // 4 byte -> số nguyên 32-bit, in thập phân
       int v = 0;
-      if (len - off < (int)sizeof(v)) { 
+      if (len - off < (int)sizeof(v)) {
         goto short_data;
       }
-      memmove(&v, data + off, sizeof(v)); // copy byte vào biến 
+      memmove(&v, data + off, sizeof(v)); // copy byte vào biến
       off += sizeof(v);
       printf("%d\n", v);
       break;
@@ -121,10 +124,10 @@ void memdump(char *fmt, char *data, int len) {
       }
       write(1, data + off, n); // không dùng %s để khỏi đọc lố quá len
       write(1, "\n", 1);
-      off = len; 
+      off = len;
       break;
     }
-    default: 
+    default:
       break;
     }
   }
