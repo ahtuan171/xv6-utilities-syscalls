@@ -35,6 +35,7 @@ filealloc(void)
   for (f = ftable.file; f < ftable.file + NFILE; f++) {
     if (f->ref == 0) {
       f->ref = 1;
+      f->console_edit = 0;
       release(&ftable.lock);
       return f;
     }
@@ -72,6 +73,9 @@ fileclose(struct file *f)
   f->ref = 0;
   f->type = FD_NONE;
   release(&ftable.lock);
+
+  if (ff.console_edit)
+    consoleeditclose(ff.console_edit);
 
   if (ff.type == FD_PIPE) {
     pipeclose(ff.pipe, ff.writable);
@@ -116,7 +120,10 @@ fileread(struct file *f, uint64 addr, int n)
   } else if (f->type == FD_DEVICE) {
     if (f->major < 0 || f->major >= NDEV || !devsw[f->major].read)
       return -1;
-    r = devsw[f->major].read(1, addr, n);
+    if (f->console_edit)
+      r = consoleeditread(f->console_edit, addr, n);
+    else
+      r = devsw[f->major].read(1, addr, n);
   } else if (f->type == FD_INODE) {
     ilock(f->ip);
     if ((r = readi(f->ip, 1, addr, f->off, n)) > 0)

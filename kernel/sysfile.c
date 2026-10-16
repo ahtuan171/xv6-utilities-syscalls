@@ -337,6 +337,8 @@ sys_open(void)
   argint(1, &omode);
   if ((n = argstr(0, path, MAXPATH)) < 0)
     return -1;
+  if ((omode & O_CONSOLE_EDIT) && omode != (O_RDONLY | O_CONSOLE_EDIT))
+    return -1;
 
   begin_op();
 
@@ -360,6 +362,14 @@ sys_open(void)
   }
 
   if (ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)) {
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  // This flag is meaningful only for a read-only console descriptor.
+  if ((omode & O_CONSOLE_EDIT) &&
+      (ip->type != T_DEVICE || ip->major != CONSOLE)) {
     iunlockput(ip);
     end_op();
     return -1;
@@ -390,6 +400,15 @@ sys_open(void)
 
   iunlock(ip);
   end_op();
+
+  if (omode & O_CONSOLE_EDIT) {
+    f->console_edit = consoleeditopen();
+    if (f->console_edit == 0) {
+      myproc()->ofile[fd] = 0;
+      fileclose(f);
+      return -1;
+    }
+  }
 
   return fd;
 }

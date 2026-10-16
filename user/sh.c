@@ -3,6 +3,9 @@
 #include "kernel/types.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
+#include "kernel/stat.h"
+#include "kernel/fs.h"
+#include "kernel/param.h"
 
 // Parsed command representation
 #define EXEC  1
@@ -12,6 +15,93 @@
 #define BACK  5
 
 #define MAXARGS 10
+#define CMDBUFSIZE 100
+
+// Check the type before reading: a device such as /console may block forever.
+int
+is_elf_program(const char *path)
+{
+  unsigned char magic[4];
+  struct stat st;
+  int fd = open(path, O_RDONLY);
+  int n = 0;
+
+  if (fd < 0)
+    return 0;
+  if (fstat(fd, &st) == 0 && st.type == T_FILE)
+    n = read(fd, magic, sizeof(magic));
+  close(fd);
+  return n == sizeof(magic) && magic[0] == 0x7f &&
+         magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
+}
+
+int
+prefix_match(const char *name, const char *prefix)
+{
+  while (*prefix) {
+    if (*name++ != *prefix++)
+      return 0;
+  }
+  return 1;
+}
+
+// Scan once for a unique match, or again to print all matches. Keep the path
+// used for lookups separate from the basename inserted into the command.
+int
+scan_completions(const char *dir, const char *prefix, int is_command,
+                 int path_command, int list, char *first)
+{
+  struct dirent de;
+  struct stat st;
+  char name[DIRSIZ + 2], path[MAXPATH];
+  int fd, count = 0;
+  int dirlen = strlen(dir);
+  int namelen, slash;
+
+  fd = open(dir, O_RDONLY);
+  if (fd < 0)
+    return -1;
+  if (fstat(fd, &st) < 0 || st.type != T_DIR) {
+    close(fd);
+    return -1;
+  }
+
+  slash = dirlen > 0 && dir[dirlen - 1] != '/';
+  while (read(fd, &de, sizeof(de)) == sizeof(de)) {
+    if (de.inum == 0)
+      continue;
+    memmove(name, de.name, DIRSIZ);
+    name[DIRSIZ] = 0;
+    if (!prefix_match(name, prefix))
+      continue;
+    if (*prefix == 0 && (strcmp(name, ".") == 0 || strcmp(name, "..") == 0))
+      continue;
+
+    namelen = strlen(name);
+    if (dirlen + slash + namelen + 1 > sizeof(path))
+      continue;
+    strcpy(path, dir);
+    if (slash)
+      path[dirlen] = '/';
+    strcpy(path + dirlen + slash, name);
+    if (stat(path, &st) < 0)
+      continue;
+    if (is_command && !(path_command && st.type == T_DIR) &&
+        !is_elf_program(path))
+      continue;
+
+    // A trailing slash lets the next Tab continue into this directory.
+    if (st.type == T_DIR)
+      strcpy(name + namelen, "/");
+    if (count == 0)
+      strcpy(first, name);
+    if (list)
+      printf("%s ", name);
+    count++;
+  }
+  close(fd);
+  return count;
+}
 
 struct cmd {
   int type;
@@ -49,6 +139,86 @@ struct backcmd {
   struct cmd *cmd;
 };
 
+void
+complete_line(char *buf, int *len, int nbuf)
+{
+  int i = 0, start = *len;
+  int command = 1, redir = 0, is_command = 0;
+  int base, prefix_len, name_len, count;
+  char dir[MAXPATH], prefix[CMDBUFSIZE], first[DIRSIZ + 2];
+
+  // Follow only the token boundaries understood by the existing parser.
+  // A redirection target does not consume the command position: >file ec.
+  while (i < *len) {
+    if (strchr(" \t\r\n\v", buf[i])) {
+      i++;
+    } else if (strchr("|;&()", buf[i])) {
+      command = buf[i] != ')';
+      redir = 0;
+      i++;
+    } else if (buf[i] == '<' || buf[i] == '>') {
+      redir = 1;
+      i++;
+    } else {
+      start = i;
+      while (i < *len && !strchr(" \t\r\n\v<|>&;()", buf[i]))
+        i++;
+      if (i == *len) {
+        is_command = command && !redir;
+        break;
+      }
+      if (redir)
+        redir = 0;
+      else
+        command = 0;
+      start = *len;
+    }
+  }
+  if (start == *len)
+    return;
+
+  base = start;
+  for (i = start; i < *len; i++)
+    if (buf[i] == '/')
+      base = i + 1;
+  if (base > start) {
+    if (base - start >= sizeof(dir))
+      return;
+    memmove(dir, buf + start, base - start);
+    dir[base - start] = 0;
+  } else {
+    strcpy(dir, is_command ? "/" : ".");
+  }
+  prefix_len = *len - base;
+  if (prefix_len >= sizeof(prefix))
+    return;
+  memmove(prefix, buf + base, prefix_len);
+  prefix[prefix_len] = 0;
+
+  count = scan_completions(dir, prefix, is_command, base > start, 0, first);
+  if (count <= 0)
+    return;
+  if (count == 1) {
+    name_len = strlen(first);
+    // Reserve space for both the eventual newline and the NUL terminator.
+    if (*len + name_len - prefix_len + 2 > nbuf) {
+      write(1, "\a", 1);
+      return;
+    }
+    memmove(buf + *len, first + prefix_len, name_len - prefix_len);
+    *len += name_len - prefix_len;
+    buf[*len] = 0;
+    write(1, first + prefix_len, name_len - prefix_len);
+    return;
+  }
+
+  printf("\n");
+  scan_completions(dir, prefix, is_command, base > start, 1, first);
+  printf("\n");
+  write(2, "$ ", 2);
+  write(1, buf, *len);
+}
+
 int fork1(void); // Fork but panics on failure.
 void panic(char *);
 struct cmd *parsecmd(char *);
@@ -64,6 +234,7 @@ runcmd(struct cmd *cmd)
   struct listcmd *lcmd;
   struct pipecmd *pcmd;
   struct redircmd *rcmd;
+  char path[MAXPATH];
 
   if (cmd == 0)
     exit(1);
@@ -77,6 +248,13 @@ runcmd(struct cmd *cmd)
     if (ecmd->argv[0] == 0)
       exit(1);
     exec(ecmd->argv[0], ecmd->argv);
+    // Preserve local executables and explicit paths; bare names also search /.
+    if (strchr(ecmd->argv[0], '/') == 0 &&
+        strlen(ecmd->argv[0]) + 2 <= sizeof(path)) {
+      path[0] = '/';
+      strcpy(path + 1, ecmd->argv[0]);
+      exec(path, ecmd->argv);
+    }
     fprintf(2, "exec %s failed\n", ecmd->argv[0]);
     break;
 
@@ -134,18 +312,76 @@ runcmd(struct cmd *cmd)
 int
 getcmd(char *buf, int nbuf)
 {
-  write(2, "$ ", 2);
+  struct stat st, console;
+  int len = 0, n, overflow = 0;
+  int editfd = -1;
+  int is_console = fstat(0, &st) == 0 && st.type == T_DEVICE &&
+                   stat("/console", &console) == 0 &&
+                   st.dev == console.dev && st.ino == console.ino;
+  char c;
+
+  // A private open gives the editor a lifetime independent of stdin/stdout.
+  // It is never inherited by a command: every return below closes it.
+  if (is_console) {
+    editfd = open("/console", O_RDONLY | O_CONSOLE_EDIT);
+    write(2, "$ ", 2);
+  }
   memset(buf, 0, nbuf);
-  gets(buf, nbuf);
-  if (buf[0] == 0) // EOF
+
+  for (;;) {
+    n = read(editfd >= 0 ? editfd : 0, &c, 1);
+    if (n <= 0) {
+      if (editfd >= 0)
+        write(1, "\n", 1);
+      break;
+    }
+    if (editfd >= 0) {
+      if (c == '\t') {
+        complete_line(buf, &len, nbuf);
+        continue;
+      }
+      if (c == '\b' || c == '\x7f' || c == ('U' - '@')) {
+        int erase = c == ('U' - '@') ? len : (len > 0);
+        while (erase-- > 0) {
+          buf[--len] = 0;
+          write(1, "\b \b", 3);
+        }
+        continue;
+      }
+    }
+    if (c == '\n' || c == '\r') {
+      buf[len++] = '\n';
+      if (editfd >= 0)
+        write(1, "\n", 1);
+      break;
+    }
+    if (len + 2 >= nbuf) {
+      if (editfd >= 0)
+        write(1, "\a", 1); // reject visibly, allow Backspace/Ctrl+U/Enter
+      else
+        overflow = 1; // drain and reject the whole line, never execute fragments
+      continue;
+    }
+    buf[len++] = c;
+    if (editfd >= 0)
+      write(1, &c, 1);
+  }
+  if (editfd >= 0)
+    close(editfd);
+  buf[len] = 0;
+  if (n < 0)
     return -1;
-  return 0;
+  if (overflow) {
+    fprintf(2, "sh: command too long\n");
+    strcpy(buf, "\n");
+  }
+  return buf[0] == 0 ? -1 : 0;
 }
 
 int
 main(void)
 {
-  static char buf[100];
+  static char buf[CMDBUFSIZE];
   int fd;
 
   // Ensure that three file descriptors are open.
@@ -165,7 +401,9 @@ main(void)
       continue;
     if (cmd[0] == 'c' && cmd[1] == 'd' && cmd[2] == ' ') {
       // Chdir must be called by the parent, not the child.
-      cmd[strlen(cmd) - 1] = 0; // chop \n
+      int len = strlen(cmd);
+      if (len > 0 && cmd[len - 1] == '\n')
+        cmd[len - 1] = 0;
       if (chdir(cmd + 3) < 0)
         fprintf(2, "cannot cd %s\n", cmd + 3);
     } else {
