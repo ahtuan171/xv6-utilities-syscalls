@@ -25,7 +25,7 @@ char *sys_sbrk(int, int);
 int pause(int);
 int uptime(void);
 int sync(void);
-
+int interpose(uint64, const char *);
 // ulib.c
 int stat(const char *, struct stat *);
 char *strcpy(char *, const char *);

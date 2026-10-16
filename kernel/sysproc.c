@@ -110,3 +110,25 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_interpose(void) {
+  uint64 mask;
+  char path[MAXPATH];
+  struct proc *p = myproc();
+  if (p->syscall_mask != 0) //Nếu đã bị sandbox từ trước thì không cho phép escape
+    return -1;
+
+  //Lấy tham số thứ nhất: mask
+  argaddr(0, &mask);
+  p->syscall_mask = mask;
+
+  //Lấy tham số thứ hai: pathname từ user space
+  if (argstr(1, path, MAXPATH) < 0) {
+    p->allowed_path[0] = '\0';
+  } else {
+    safestrcpy(p->allowed_path, path, MAXPATH);
+  }
+  
+  return 0;
+}

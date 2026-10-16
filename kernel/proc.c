@@ -278,6 +278,10 @@ kfork(void)
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
+  //Copy sandbox state từ proc parent
+  np->syscall_mask = p->syscall_mask;
+  safestrcpy(np->allowed_path, p->allowed_path, MAXPATH);
+
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
 
