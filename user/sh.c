@@ -17,6 +17,232 @@
 #define MAXARGS    10
 #define CMDBUFSIZE 100
 
+#define HISTORY_CAPACITY 10
+
+// Only the parent shell inserts entries. Strings never alias the input buffer.
+static struct {
+  struct {
+    uint64 id;
+    char command[CMDBUFSIZE];
+  } entries[HISTORY_CAPACITY];
+  int first;
+  int count;
+  uint64 last_id;
+} history;
+static char history_draft[CMDBUFSIZE];
+
+static const char *
+history_command(int index)
+{
+  return history.entries[(history.first + index) % HISTORY_CAPACITY].command;
+}
+
+static int
+history_add(const char *command)
+{
+  int slot;
+
+  if (strlen(command) >= CMDBUFSIZE) {
+    fprintf(2, "history: command too long\n");
+    return -1;
+  }
+  if (history.last_id == ~(uint64)0) {
+    fprintf(2, "history: command ID limit reached\n");
+    return -1;
+  }
+  if (history.count == HISTORY_CAPACITY) {
+    slot = history.first;
+    history.first = (history.first + 1) % HISTORY_CAPACITY;
+  } else {
+    slot = (history.first + history.count++) % HISTORY_CAPACITY;
+  }
+  history.entries[slot].id = ++history.last_id;
+  strcpy(history.entries[slot].command, command);
+  return 0;
+}
+
+static void
+history_print(void)
+{
+  for (int i = 0; i < history.count; i++) {
+    int slot = (history.first + i) % HISTORY_CAPACITY;
+    printf("%lu %s\n", history.entries[slot].id, history_command(i));
+  }
+}
+
+// Normalize only the outer whitespace, using the parser's whitespace set.
+static void
+trim_command(char *buf)
+{
+  int start = 0, end = strlen(buf);
+
+  while (start < end && strchr(" \t\r\n\v", buf[start]))
+    start++;
+  while (end > start && strchr(" \t\r\n\v", buf[end - 1]))
+    end--;
+  memmove(buf, buf + start, end - start);
+  buf[end - start] = 0;
+}
+
+// Resolve a standalone reference before history_add can evict its source.
+// Compound commands remain the parser's responsibility; expansion is not recursive.
+static int
+history_expand(char *buf)
+{
+  const char *command = 0;
+  uint64 id = 0;
+
+  if (buf[0] != '!')
+    return 0;
+  for (int i = 1; buf[i]; i++)
+    if (strchr(" \t\r\n\v<|>&;()", buf[i]))
+      return 0;
+
+  if (strcmp(buf, "!!") == 0) {
+    if (history.count)
+      command = history_command(history.count - 1);
+  } else {
+    if (buf[1] == 0)
+      goto invalid;
+    for (int i = 1; buf[i]; i++) {
+      int digit = buf[i] - '0';
+      if (digit < 0 || digit > 9 || id > (~(uint64)0 - digit) / 10)
+        goto invalid;
+      id = id * 10 + digit;
+    }
+    if (id == 0)
+      goto invalid;
+    for (int i = 0; i < history.count; i++) {
+      int slot = (history.first + i) % HISTORY_CAPACITY;
+      if (history.entries[slot].id == id) {
+        command = history_command(i);
+        break;
+      }
+    }
+  }
+  if (command == 0) {
+    fprintf(2, "history: event not found: %s\n", buf);
+    return -1;
+  }
+  strcpy(buf, command);
+  printf("%s\n", buf);
+  return 0;
+
+invalid:
+  fprintf(2, "history: invalid reference: %s\n", buf);
+  return -1;
+}
+
+// Save the prompt origin for replacing a line, including soft-wrapped rows
+// still in the viewport. No terminal dimensions or additional syscall needed.
+static void
+editor_prompt(void)
+{
+  write(2, "\0337$ ", 4);
+}
+
+static void
+editor_redraw(const char *buf, int len)
+{
+  write(1, "\0338\033[J", 5);
+  write(2, "$ ", 2);
+  write(1, buf, len);
+}
+
+enum escape_state {
+  ESC_NONE,
+  ESC_START,
+  ESC_INTERMEDIATE,
+  ESC_CSI,
+  ESC_PARAMS,
+  ESC_SS3,
+  ESC_STRING,
+  ESC_STRING_END
+};
+enum history_key { KEY_TEXT, KEY_IGNORE, KEY_UP, KEY_DOWN };
+
+// Each call consumes at most the byte already read by getcmd. No lookahead
+// read, byte buffer, or assumption that an escape sequence arrives together.
+static int
+history_key(unsigned char c, int *state)
+{
+  if (c == '\n' || c == '\r' || c == '\t' || c == '\b' || c == '\x7f' ||
+      c == ('U' - '@')) {
+    *state = ESC_NONE;
+    return KEY_TEXT;
+  }
+  if (*state == ESC_STRING || *state == ESC_STRING_END) {
+    if (c == '\a' || (*state == ESC_STRING_END && c == '\\'))
+      *state = ESC_NONE;
+    else
+      *state = c == '\033' ? ESC_STRING_END : ESC_STRING;
+    return KEY_IGNORE;
+  }
+  if (c == '\033') {
+    *state = ESC_START;
+    return KEY_IGNORE;
+  }
+  switch (*state) {
+  case ESC_NONE:
+    return KEY_TEXT;
+  case ESC_START:
+    if (c == '[')
+      *state = ESC_CSI;
+    else if (c == 'O')
+      *state = ESC_SS3;
+    else if (c == ']' || c == 'P' || c == '^' || c == '_')
+      *state = ESC_STRING;
+    else {
+      *state = c >= 0x20 && c <= 0x2f ? ESC_INTERMEDIATE : ESC_NONE;
+      // A standalone ESC must not swallow the next ordinary character.
+      // Let getcmd process this byte once; keep recognized sequences ignored.
+      if (*state == ESC_NONE && c >= 0x20 && c <= 0x7e)
+        return KEY_TEXT;
+    }
+    return KEY_IGNORE;
+  case ESC_INTERMEDIATE:
+    if (c < 0x20 || c > 0x2f)
+      *state = ESC_NONE;
+    return KEY_IGNORE;
+  default: // CSI, SS3, or a parameterized unsupported sequence
+    if (c >= 0x40 && c <= 0x7e) {
+      int arrow = *state != ESC_PARAMS;
+      *state = ESC_NONE;
+      if (arrow && c == 'A')
+        return KEY_UP;
+      if (arrow && c == 'B')
+        return KEY_DOWN;
+    } else {
+      *state = c >= 0x20 && c <= 0x3f ? ESC_PARAMS : ESC_NONE;
+    }
+    return KEY_IGNORE;
+  }
+}
+
+static int
+history_navigate(int key, char *buf, int *len, int *position)
+{
+  const char *command;
+
+  if (key == KEY_UP) {
+    if (*position == 0)
+      return 0;
+    if (*position == history.count)
+      strcpy(history_draft, buf);
+    (*position)--;
+  } else {
+    if (*position == history.count)
+      return 0;
+    (*position)++;
+  }
+  command =
+    *position == history.count ? history_draft : history_command(*position);
+  strcpy(buf, command);
+  *len = strlen(buf);
+  editor_redraw(buf, *len);
+  return 1;
+}
+
 // Check the type before reading: a device such as /console may block forever.
 int
 is_elf_program(const char *path)
@@ -215,7 +441,7 @@ complete_line(char *buf, int *len, int nbuf)
   printf("\n");
   scan_completions(dir, prefix, is_command, base > start, 1, first);
   printf("\n");
-  write(2, "$ ", 2);
+  editor_prompt();
   write(1, buf, *len);
 }
 
@@ -315,6 +541,7 @@ getcmd(char *buf, int nbuf)
   struct stat st, console;
   int len = 0, n, overflow = 0;
   int editfd = -1;
+  int escape = ESC_NONE, position = history.count, recalled = 0;
   int is_console = fstat(0, &st) == 0 && st.type == T_DEVICE &&
                    stat("/console", &console) == 0 && st.dev == console.dev &&
                    st.ino == console.ino;
@@ -324,9 +551,10 @@ getcmd(char *buf, int nbuf)
   // It is never inherited by a command: every return below closes it.
   if (is_console) {
     editfd = open("/console", O_RDONLY | O_CONSOLE_EDIT);
-    write(2, "$ ", 2);
+    editor_prompt();
   }
   memset(buf, 0, nbuf);
+  history_draft[0] = 0;
 
   for (;;) {
     n = read(editfd >= 0 ? editfd : 0, &c, 1);
@@ -336,6 +564,13 @@ getcmd(char *buf, int nbuf)
       break;
     }
     if (editfd >= 0) {
+      int key = history_key((unsigned char)c, &escape);
+      if (key == KEY_IGNORE)
+        continue;
+      if (key == KEY_UP || key == KEY_DOWN) {
+        recalled |= history_navigate(key, buf, &len, &position);
+        continue;
+      }
       if (c == '\t') {
         complete_line(buf, &len, nbuf);
         continue;
@@ -344,8 +579,11 @@ getcmd(char *buf, int nbuf)
         int erase = c == ('U' - '@') ? len : (len > 0);
         while (erase-- > 0) {
           buf[--len] = 0;
-          write(1, "\b \b", 3);
+          if (!recalled)
+            write(1, "\b \b", 3);
         }
+        if (recalled)
+          editor_redraw(buf, len);
         continue;
       }
     }
@@ -364,6 +602,7 @@ getcmd(char *buf, int nbuf)
       continue;
     }
     buf[len++] = c;
+    buf[len] = 0;
     if (editfd >= 0)
       write(1, &c, 1);
   }
@@ -395,16 +634,18 @@ main(void)
 
   // Read and run input commands.
   while (getcmd(buf, sizeof(buf)) >= 0) {
-    char *cmd = buf;
-    while (*cmd == ' ' || *cmd == '\t')
-      cmd++;
-    if (*cmd == '\n') // is a blank command
+    trim_command(buf);
+    if (buf[0] == 0 || history_expand(buf) < 0)
       continue;
+    if (history_add(buf) < 0)
+      continue;
+    if (strcmp(buf, "history") == 0) {
+      history_print();
+      continue;
+    }
+    char *cmd = buf;
     if (cmd[0] == 'c' && cmd[1] == 'd' && cmd[2] == ' ') {
       // Chdir must be called by the parent, not the child.
-      int len = strlen(cmd);
-      if (len > 0 && cmd[len - 1] == '\n')
-        cmd[len - 1] = 0;
       if (chdir(cmd + 3) < 0)
         fprintf(2, "cannot cd %s\n", cmd + 3);
     } else {
