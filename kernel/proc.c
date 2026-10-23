@@ -607,20 +607,20 @@ kkill(int pid)
     acquire(&p->lock);
     if (p->pid == pid) {
 
-        // Protect the init process from being killed.
-        if (p == initproc) {
-            release(&p->lock);
-            return -1;
-        }
-
-        p->killed = 1;
-
-        if (p->state == SLEEPING) {
-            p->state = RUNNABLE;
-        }
-
+      // Protect the init process from being killed.
+      if (p == initproc) {
         release(&p->lock);
-        return 0;
+        return -1;
+      }
+
+      p->killed = 1;
+
+      if (p->state == SLEEPING) {
+        p->state = RUNNABLE;
+      }
+
+      release(&p->lock);
+      return 0;
     }
     release(&p->lock);
   }
